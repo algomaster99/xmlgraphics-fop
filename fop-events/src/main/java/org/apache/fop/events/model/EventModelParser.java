@@ -19,13 +19,20 @@
 
 package org.apache.fop.events.model;
 
+import java.io.InputStream;
+import java.io.Reader;
 import java.util.Stack;
 
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamConstants;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 import javax.xml.transform.Source;
 import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerException;
 import javax.xml.transform.sax.SAXResult;
 import javax.xml.transform.sax.SAXTransformerFactory;
+import javax.xml.transform.stream.StreamSource;
 
 import org.xml.sax.Attributes;
 import org.xml.sax.ContentHandler;
@@ -53,19 +60,98 @@ public final class EventModelParser {
 
     /**
      * Parses an event model file into an EventModel instance.
+     *
+     * Uses StAX for StreamSource inputs to avoid SAX re-entrancy (FWK005) when
+     * this method is called from within an active SAX parse (e.g. during FO
+     * document transformation). StAX readers are created fresh per call and share
+     * no static state with ongoing SAX parses.
+     *
      * @param src the Source instance pointing to the XML file
      * @return the created event model structure
      * @throws TransformerException if an error occurs while parsing the XML file
      */
     public static EventModel parse(Source src)
             throws TransformerException {
+        if (src instanceof StreamSource) {
+            try {
+                return parseWithStAX((StreamSource) src);
+            } catch (XMLStreamException e) {
+                throw new TransformerException("Error reading event model: " + e.getMessage(), e);
+            }
+        }
+        // Fallback: SAX path for non-StreamSource inputs (not used in practice)
         Transformer transformer = tFactory.newTransformer();
         transformer.setErrorListener(new DefaultErrorListener(LOG));
-
         EventModel model = new EventModel();
         SAXResult res = new SAXResult(getContentHandler(model));
-
         transformer.transform(src, res);
+        return model;
+    }
+
+    private static EventModel parseWithStAX(StreamSource src) throws XMLStreamException {
+        XMLInputFactory xif = XMLInputFactory.newInstance();
+        xif.setProperty(XMLInputFactory.IS_SUPPORTING_EXTERNAL_ENTITIES, Boolean.FALSE);
+        xif.setProperty(XMLInputFactory.SUPPORT_DTD, Boolean.FALSE);
+
+        XMLStreamReader reader;
+        InputStream in = src.getInputStream();
+        if (in != null) {
+            reader = xif.createXMLStreamReader(in);
+        } else {
+            Reader r = src.getReader();
+            reader = xif.createXMLStreamReader(r);
+        }
+
+        EventModel model = new EventModel();
+        Stack objectStack = new Stack();
+
+        try {
+            while (reader.hasNext()) {
+                int event = reader.next();
+                if (event == XMLStreamConstants.START_ELEMENT) {
+                    String localName = reader.getLocalName();
+                    if ("event-model".equals(localName)) {
+                        objectStack.push(model);
+                    } else if ("producer".equals(localName)) {
+                        EventProducerModel producer = new EventProducerModel(
+                                reader.getAttributeValue(null, "name"));
+                        ((EventModel) objectStack.peek()).addProducer(producer);
+                        objectStack.push(producer);
+                    } else if ("method".equals(localName)) {
+                        EventSeverity severity = EventSeverity.valueOf(
+                                reader.getAttributeValue(null, "severity"));
+                        String ex = reader.getAttributeValue(null, "exception");
+                        EventMethodModel method = new EventMethodModel(
+                                reader.getAttributeValue(null, "name"), severity);
+                        if (ex != null && ex.length() > 0) {
+                            method.setExceptionClass(ex);
+                        }
+                        ((EventProducerModel) objectStack.peek()).addMethod(method);
+                        objectStack.push(method);
+                    } else if ("parameter".equals(localName)) {
+                        String className = reader.getAttributeValue(null, "type");
+                        Class type;
+                        try {
+                            type = Class.forName(className);
+                        } catch (ClassNotFoundException e) {
+                            throw new XMLStreamException(
+                                    "Could not find Class for: " + className, e);
+                        }
+                        String name = reader.getAttributeValue(null, "name");
+                        objectStack.push(
+                                ((EventMethodModel) objectStack.peek()).addParameter(type, name));
+                    } else {
+                        throw new XMLStreamException("Invalid element: " + localName);
+                    }
+                } else if (event == XMLStreamConstants.END_ELEMENT) {
+                    if (!objectStack.isEmpty()) {
+                        objectStack.pop();
+                    }
+                }
+            }
+        } finally {
+            reader.close();
+        }
         return model;
     }
 
