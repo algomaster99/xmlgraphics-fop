@@ -29,7 +29,7 @@
           <exclude>org/apache/fop/tools/model2translation.xsl</exclude>
         </excludes>
       </unpackOptions>
-      <useTransitiveDependencies>false</useTransitiveDependencies>
+      <useTransitiveDependencies>true</useTransitiveDependencies>
     </dependencySet>
   </dependencySets>
 </assembly>
